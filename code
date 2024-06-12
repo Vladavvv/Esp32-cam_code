@@ -1,0 +1,192 @@
+#include <Arduino.h>
+#include "esp_camera.h"
+#include <PubSubClient.h>
+#include <WebServer.h>
+#include <WiFi.h>
+#include <esp32cam.h>
+
+#define PIN1 2 //gpio 2 in the esp
+#define PIN11 14 //gpio 4 in the esp
+
+const char* mqttBroker = "broker.emqx.io";
+WiFiClient client;
+PubSubClient mqtt(client);
+
+WiFiClient espClient;
+ThingsBoard tb(espClient);
+
+// void connectWifi();
+void mqttConnect(); 
+void mqttReceive(char *topic, byte*msg, unsigned int msgLength);
+void startCameraServer();
+void setupLedFlash(int pin);
+ 
+const char* WIFI_SSID = "Galaxy A34 5G EBC3";
+const char* WIFI_PASS = "2ibre9z3hba7juf";
+
+const int pwmChannel = 0;
+const int frequency = 20000;
+const int resolution = 8;
+
+// const char* WIFI_SSID = "AndroidAP3790";
+// const char* WIFI_PASS = "imil6530";
+ 
+WebServer server(80);
+ 
+ 
+static auto loRes = esp32cam::Resolution::find(320, 240);
+static auto midRes = esp32cam::Resolution::find(350, 530);
+static auto hiRes = esp32cam::Resolution::find(800, 600);
+void getJpg()
+{
+  auto frame = esp32cam::capture();
+  if (frame == nullptr) {
+    Serial.println("CAPTURE FAIL");
+    server.send(503, "", "");
+    return;
+  }
+  // Serial.printf("CAPTURE OK %dx%d %db\n", frame->getWidth(), frame->getHeight(),
+  //               static_cast<int>(frame->size()));
+ 
+  server.setContentLength(frame->size());
+  server.send(200, "image/jpeg");
+  WiFiClient client = server.client();
+  frame->writeTo(client);
+}
+ 
+void changeJpgToLow()
+{
+  if (!esp32cam::Camera.changeResolution(loRes)) {
+    Serial.println("SET-LO-RES FAIL");
+  }
+  getJpg();
+}
+ 
+void changeJpgToHigh()
+{
+  if (!esp32cam::Camera.changeResolution(hiRes)) {
+    Serial.println("SET-HI-RES FAIL");
+  }
+  getJpg();
+}
+ 
+void changeJpgToMid()
+{
+  if (!esp32cam::Camera.changeResolution(midRes)) {
+    Serial.println("SET-MID-RES FAIL");
+  }
+  getJpg();
+}
+ 
+ 
+void  setup(){
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+    
+  pinMode(PIN1, OUTPUT);
+  // pinMode(PIN11, OUTPUT);
+
+  // Configure the PWM channel
+  ledcSetup(pwmChannel, pwmFrequency, pwmResolution);
+  
+  // Attach the channel to the motor pin
+  ledcAttachPin(PIN11, pwmChannel);
+
+  Serial.begin(115200);
+  Serial.println();
+  {
+    using namespace esp32cam;
+    Config cfg;
+    cfg.setPins(pins::AiThinker);
+    cfg.setResolution(hiRes);
+    cfg.setBufferCount(2);
+    cfg.setJpeg(80);
+ 
+    bool ok = Camera.begin(cfg);
+    // Serial.println(ok ? "CAMERA OK" : "CAMERA FAIL");
+  }
+  
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+  
+  Serial.print("http://");
+  Serial.println(WiFi.localIP());
+  Serial.println("  /cam-lo.jpg");
+  Serial.println("  /cam-hi.jpg");
+  Serial.println("  /cam-mid.jpg");
+ 
+  server.on("/cam-lo.jpg", changeJpgToLow);
+  server.on("/cam-hi.jpg", changeJpgToHigh);
+  server.on("/cam-mid.jpg", changeJpgToMid);
+ 
+  server.begin();
+
+
+  mqtt.setServer(mqttBroker, 1883);
+  mqtt.setCallback(mqttReceive);
+}
+ 
+void loop()
+{
+  server.handleClient();
+      if(!mqtt.connected()){
+        mqttConnect();
+        Serial.println("MQTT Connected");
+    }
+    mqtt.loop();
+    delay(100);
+
+
+}
+
+
+void mqttConnect(){
+    while (!mqtt.connected())
+    {
+        Serial.println("Connecting to MQTT...");
+        if(mqtt.connect("mqtt_test")){
+            mqtt.subscribe("light"); //match the topic from the previous code
+            mqtt.subscribe("fan");
+        }
+    }
+    
+}
+
+
+int value; 
+
+void mqttReceive(char *topic, byte*msg, unsigned int msgLength){
+        
+        String data;
+        Serial.println(topic);
+        for(int i = 0; i < msgLength; i++){
+            Serial.print(char(msg[i]));
+            data += (char)msg[i];
+        }
+        Serial.println("");
+
+        int value = data.toInt();
+        digitalWrite(PIN1, 0);
+        ledcWrite(pwmChannel, 0);
+
+
+        if (strcmp(topic, "light") == 0) {
+          Serial.println("light is on!!!");
+        switch (value) {
+            case 0:
+                digitalWrite(PIN1, 0);
+                break;
+            case 1:
+                digitalWrite(PIN1, 1);
+                break;
+        }
+        }
+        if (strcmp(topic, "fan") == 0) {
+          Serial.println(value);
+          ledcWrite(pwmChannel, value);
+
+
+    }
